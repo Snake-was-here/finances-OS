@@ -6,7 +6,7 @@ type Bucket = { id: string; name: string; percent: number; color: string; target
 type Entry = { id: string; date: string; amount: number; note: string };
 type Expense = { id: string; date: string; category: string; amount: number; note: string; pullId?: string };
 type Payout = { id: string; period: string; date: string; amount: number; deposited?: boolean };
-type HourLog = { id: string; date: string; hours: number };
+type HourLog = { id: string; date: string; hours: number; rate?: number };
 type Pull = { id: string; date: string; bucketId: string; amount: number; note: string };
 type Data = { salary: number; dailyPay: number; hoursPerDay: number; workDays: number; startDate: string; bank: number; buckets: Bucket[]; entries: Entry[]; expenses: Expense[]; payouts: Payout[]; hourLogs: HourLog[]; skipped: string[]; pulls: Pull[] };
 
@@ -69,9 +69,10 @@ export default function Home() {
   const [expenseCategory, setExpenseCategory] = useState("Maistas");
   const [expenseNote, setExpenseNote] = useState("");
 
-  // Hours
+  // Hours (Overtime)
   const [hourInput, setHourInput] = useState("1");
   const [hourDate, setHourDate] = useState(isoToday());
+  const [hourRateMultiplier, setHourRateMultiplier] = useState("1");
 
   // Past day skip picker
   const [skipDate, setSkipDate] = useState(isoToday());
@@ -95,13 +96,20 @@ export default function Home() {
   const effectiveStart = data.startDate && data.startDate > monthStart ? data.startDate : monthStart;
   const monthWorkdays = data.startDate ? weekdaysBetween(effectiveStart, today, data.workDays, data.skipped) : 0;
   const totalWorkdays = weekdaysBetween(data.startDate, today, data.workDays, data.skipped);
+  const hourlyBase = data.hoursPerDay > 0 ? (data.dailyPay / data.hoursPerDay) : 12.5;
+
+  const monthHourLogs = data.hourLogs.filter(x => x.date.startsWith(monthPrefix));
+  const monthOvertimeHours = monthHourLogs.reduce((sum, x) => sum + x.hours, 0);
+  const monthOvertimePay = monthHourLogs.reduce((sum, x) => sum + x.hours * (x.rate ?? hourlyBase), 0);
+  const lifetimeOvertimePay = data.hourLogs.reduce((sum, x) => sum + x.hours * (x.rate ?? hourlyBase), 0);
+
   const baseEarned = monthWorkdays * data.dailyPay;
   const monthEntries = data.entries.filter(x => x.date.startsWith(monthPrefix));
   const monthExpenses = data.expenses.filter(x => x.date.startsWith(monthPrefix));
   const extras = monthEntries.reduce((sum, x) => sum + x.amount, 0);
   const lifetimeExtras = data.entries.reduce((sum, x) => sum + x.amount, 0);
-  const earned = baseEarned + extras;
-  const lifetime = totalWorkdays * data.dailyPay + lifetimeExtras;
+  const earned = baseEarned + extras + monthOvertimePay;
+  const lifetime = totalWorkdays * data.dailyPay + lifetimeExtras + lifetimeOvertimePay;
   const spent = monthExpenses.reduce((sum, x) => sum + x.amount, 0);
   const net = earned - spent;
   const allocation = Math.round(data.buckets.reduce((sum, x) => sum + x.percent, 0) * 10) / 10;
@@ -110,7 +118,7 @@ export default function Home() {
   const goalSaved = data.buckets.reduce((sum, b) => { if (!b.target) return sum; const pulled = data.pulls.filter(x => x.bucketId === b.id).reduce((s, x) => s + x.amount, 0); return sum + Math.max(0, lifetime * b.percent / 100 - pulled); }, 0);
   const goalPct = goalTarget ? Math.min(100, goalSaved / goalTarget * 100) : 0;
   const paid = data.payouts.find(x => x.period === monthPrefix);
-  const monthHours = monthWorkdays * data.hoursPerDay + data.hourLogs.filter(x => x.date.startsWith(monthPrefix)).reduce((sum, x) => sum + x.hours, 0);
+  const monthHours = monthWorkdays * data.hoursPerDay + monthOvertimeHours;
 
   const life = useMemo(() => {
     if (!data.startDate) return [] as { key: string; label: string; amount: number; total: number; worked: boolean }[];
@@ -119,14 +127,16 @@ export default function Home() {
     while (cursor <= end) {
       const key = localISO(cursor);
       const extra = data.entries.filter(x => x.date === key).reduce((sum, x) => sum + x.amount, 0);
+      const dayOvertime = data.hourLogs.filter(x => x.date === key).reduce((sum, x) => sum + x.hours * (x.rate ?? hourlyBase), 0);
       const worked = isWorkday(cursor, data.workDays) && !off.has(key);
-      const amount = (worked ? data.dailyPay : 0) + extra;
+      const amount = (worked ? data.dailyPay : 0) + extra + dayOvertime;
       running += amount;
       rows.push({ key, label: shortDate(key), amount, total: running, worked });
       cursor.setDate(cursor.getDate() + 1);
     }
     return rows;
-  }, [data.dailyPay, data.entries, data.skipped, data.startDate, data.workDays, today]);
+  }, [data.dailyPay, data.entries, data.hourLogs, data.skipped, data.startDate, data.workDays, hourlyBase, today]);
+
 
   const days = chartSpan === "all" && life.length ? life : life.slice(-14);
   const plotted = days.length ? days : [{ key: today, label: shortDate(today), amount: 0, total: 0, worked: false }];
@@ -230,7 +240,8 @@ export default function Home() {
     const hours = Number(hourInput);
     if (!Number.isFinite(hours) || hours <= 0) return;
     const targetDate = hourDate || today;
-    setData(d => ({ ...d, hourLogs: [...d.hourLogs, { id: crypto.randomUUID(), date: targetDate, hours }] }));
+    const rate = hourlyBase * Number(hourRateMultiplier);
+    setData(d => ({ ...d, hourLogs: [...d.hourLogs, { id: crypto.randomUUID(), date: targetDate, hours, rate }] }));
   }
 
   function setNumber(key: "salary" | "dailyPay" | "hoursPerDay" | "workDays", value: string) {
@@ -278,7 +289,7 @@ export default function Home() {
 
   return <main className="app-shell">
     <header><a className="logo" href="#top">FINANSŲ<span>OS</span></a><div className="header-actions"><span className="date">{new Intl.DateTimeFormat("lt-LT", { month: "long", year: "numeric" }).format(new Date())}</span><button className="icon-button" onClick={() => setEditing(!editing)} aria-label="Atidaryti redagavimą">{editing ? "×" : "⚙"}</button></div></header>
-    <section className="hero" id="top"><div><p className="eyebrow">APSKAIČIUOTA, DAR NE IŠMOKA</p><h1>{euros(net)}</h1><p className="subcopy">{data.startDate ? `${euros(baseEarned)} automatiškai · ${euros(extras)} papildomai · ${euros(spent)} išleista` : "Nustatyk darbo pradžios datą per ⚙ ir progresas pradės judėti pats."}</p></div></section>
+    <section className="hero" id="top"><div><p className="eyebrow">APSKAIČIUOTA, DAR NE IŠMOKA</p><h1>{euros(net)}</h1><p className="subcopy">{data.startDate ? `${euros(baseEarned)} automatiškai · ${euros(extras)} papildomai${monthOvertimePay > 0 ? ` · ${euros(monthOvertimePay)} viršvalandžiai` : ""} · ${euros(spent)} išleista` : "Nustatyk darbo pradžios datą per ⚙ ir progresas pradės judėti pats."}</p></div></section>
     <nav className="view-switcher"><button className={view === "overview" ? "selected" : ""} onClick={() => setView("overview")}>Apžvalga</button><button className={view === "chart" ? "selected" : ""} onClick={() => setView("chart")}>Kaupimasis</button><button className={view === "goals" ? "selected" : ""} onClick={() => setView("goals")}>Dėžutės</button><button className={view === "bank" ? "selected" : ""} onClick={() => setView("bank")}>Sąskaita</button></nav>
 
     {editing && <aside className="editor">
@@ -287,7 +298,6 @@ export default function Home() {
       <label>Uždarbis už dieną<input type="number" value={data.dailyPay} onChange={e => setNumber("dailyPay", e.target.value)}/></label>
       <label>Valandos per dieną<input type="number" value={data.hoursPerDay} onChange={e => setNumber("hoursPerDay", e.target.value)}/></label>
       <label>Darbo dienos per savaitę<input type="number" min="1" max="7" value={data.workDays} onChange={e => setNumber("workDays", e.target.value)}/></label>
-      <label>Mėnesio planas<input type="number" value={data.salary} onChange={e => setNumber("salary", e.target.value)}/></label>
       <form onSubmit={addBonus} className="entry-form">
         <label>Data<input type="date" value={bonusDate} onChange={e => setBonusDate(e.target.value)} /></label>
         <label>Papildoma suma<input inputMode="decimal" value={bonus} onChange={e => setBonus(e.target.value)} /></label>
@@ -332,10 +342,15 @@ export default function Home() {
           <small>{monthWorkdays} darbo dienos · {data.hoursPerDay} val. standartas</small>
           <form onSubmit={addHours} className="entry-form">
             <label>Data<input type="date" value={hourDate} onChange={e => setHourDate(e.target.value)} /></label>
-            <label>Papildomai valandų<input type="number" min="0.5" step="0.5" value={hourInput} onChange={e => setHourInput(e.target.value)} /></label>
+            <label>Valandos<input type="number" min="0.5" step="0.5" value={hourInput} onChange={e => setHourInput(e.target.value)} /></label>
+            <label>Tarifas<select value={hourRateMultiplier} onChange={e => setHourRateMultiplier(e.target.value)}>
+              <option value="1">× 1.0 – standartinis</option>
+              <option value="1.5">× 1.5 – viršvalandžiai</option>
+              <option value="2">× 2.0 – šventiniai</option>
+            </select></label>
             <button className="secondary">Pridėti</button>
           </form>
-          {data.hourLogs.length > 0 && <div className="ledger">{[...data.hourLogs].sort((a, b) => b.date.localeCompare(a.date)).map(x => <div key={x.id}><span>{shortDate(x.date)}</span><b>{x.hours} val.</b><button type="button" onClick={() => removeHour(x.id)}>Išimti</button></div>)}</div>}
+          {data.hourLogs.length > 0 && <div className="ledger">{[...data.hourLogs].sort((a, b) => b.date.localeCompare(a.date)).map(x => <div key={x.id}><span>{shortDate(x.date)}</span><b>{x.hours} val. → {euros(x.hours * (x.rate ?? hourlyBase))}</b><button type="button" onClick={() => removeHour(x.id)}>Išimti</button></div>)}</div>}
         </article>
         <article className="metric-card"><p>Nuo pradžios</p><strong>{totalWorkdays} d.</strong><small>{totalWorkdays * data.hoursPerDay} val. pagal ritmą</small></article>
         <section className="quick-work">
@@ -415,12 +430,12 @@ export default function Home() {
     </section>}
 
     {view === "goals" && <section className="goals-view">
-      <div className="section-heading"><div><p className="eyebrow">KUR KELIAUJA UŽDARBIS</p><h2>Dėžutės nuo {euros(data.salary)}</h2></div><p>{allocation} % paskirstyta</p></div>
+      <div className="section-heading"><div><p className="eyebrow">KUR KELIAUJA UŽDARBIS</p><h2>Dėžutės nuo {euros(earned)}</h2></div><p>{allocation} % paskirstyta</p></div>
       <p className="intro">Kiekviena dėžutė ima savo dalį. Kreivė rodo, kaip ta dalis auga: 100, tada 200, tada 300. Kai tikslas pilnas arba nori keisti proporcijas, procentą ir tikslą gali pakeisti bet kada.</p>
 
       {allocation < 100 && <aside className="allocation-alert warning">
         <div className="allocation-alert-content">
-          <strong>Laisvas likutis: {unallocatedPercent} % ({euros(data.salary * unallocatedPercent / 100)} / mėn.)</strong>
+          <strong>Laisvas likutis: {unallocatedPercent} % ({euros(earned * unallocatedPercent / 100)} / mėn.)</strong>
           <p>Šis likutis lieka laisvas ir nesiunčiamas į jokią dėžutę, kol pats jo nepriskiri.</p>
         </div>
       </aside>}
@@ -431,12 +446,12 @@ export default function Home() {
         </div>
       </aside>}
       {allocation === 100 && <aside className="allocation-alert ok">
-        <p>Paskirstyta tiksliai 100 % ({euros(data.salary)} / mėn.). Kiekviena dalis turi savo paskirtį.</p>
+        <p>Paskirstyta tiksliai 100 % ({euros(earned)} / mėn.). Kiekviena dalis turi savo paskirtį.</p>
       </aside>}
 
       <div className="bucket-grid">
         {data.buckets.map(bucket => {
-          const monthSlice = data.salary * bucket.percent / 100;
+          const monthSlice = earned * bucket.percent / 100;
           const pulled = data.pulls.filter(x => x.bucketId === bucket.id).reduce((sum, x) => sum + x.amount, 0);
           const saved = lifetime * bucket.percent / 100 - pulled;
           const reached = bucket.target > 0 && saved >= bucket.target;
